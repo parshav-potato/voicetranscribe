@@ -7,10 +7,12 @@ import sys
 import os
 import math
 import time
+import struct
 import threading
 import tempfile
 import tkinter as tk
 from tkinter import messagebox
+from datetime import datetime
 import queue
 
 from voice_transcribe import (
@@ -59,9 +61,30 @@ COLORS = {
     "pin_active": "#f9e2af",
     "pin_inactive": "#6c7086",
     "tooltip_bg": "#313244",
+    "meter_bg": "#11111b",
+    "meter_green": "#a6e3a1",
+    "meter_orange": "#fab387",
+    "meter_red": "#f38ba8",
 }
 
 HOTKEY = "ctrl+shift+r"
+
+LANGUAGES = [
+    ("Auto-detect", None),
+    ("English", "en"),
+    ("German", "de"),
+    ("French", "fr"),
+    ("Spanish", "es"),
+    ("Japanese", "ja"),
+    ("Chinese", "zh"),
+    ("Dutch", "nl"),
+    ("Italian", "it"),
+    ("Portuguese", "pt"),
+    ("Russian", "ru"),
+    ("Korean", "ko"),
+]
+
+MAX_HISTORY = 20
 
 
 class Tooltip:
@@ -78,17 +101,12 @@ class Tooltip:
         frame.pack(padx=1, pady=1)
 
         label = tk.Label(
-            frame,
-            text=text,
-            bg=COLORS["tooltip_bg"],
-            fg=COLORS["text"],
-            font=("Segoe UI", 9),
-            wraplength=300,
-            justify=tk.LEFT,
+            frame, text=text,
+            bg=COLORS["tooltip_bg"], fg=COLORS["text"],
+            font=("Segoe UI", 9), wraplength=300, justify=tk.LEFT,
         )
         label.pack()
 
-        # Position near parent window
         x = parent.winfo_rootx() + 10
         y = parent.winfo_rooty() + parent.winfo_height() + 4
         self.tw.geometry(f"+{x}+{y}")
@@ -104,6 +122,79 @@ class Tooltip:
             self.tw = None
 
 
+class HistoryDropdown:
+    """Dropdown panel showing transcription history."""
+
+    def __init__(self, parent, history, on_select):
+        self.parent = parent
+        self.tw = tk.Toplevel(parent)
+        self.tw.overrideredirect(True)
+        self.tw.attributes("-topmost", True)
+        self.tw.configure(bg=COLORS["border"])
+
+        container = tk.Frame(self.tw, bg=COLORS["tooltip_bg"], padx=1, pady=1)
+        container.pack(padx=1, pady=1)
+
+        if not history:
+            lbl = tk.Label(
+                container, text="No history yet",
+                bg=COLORS["tooltip_bg"], fg=COLORS["text_dim"],
+                font=("Segoe UI", 9), padx=10, pady=6,
+            )
+            lbl.pack()
+        else:
+            for i, (timestamp, text) in enumerate(reversed(history)):
+                preview = text[:60] + ("..." if len(text) > 60 else "")
+                time_str = timestamp.strftime("%H:%M")
+
+                entry_frame = tk.Frame(container, bg=COLORS["tooltip_bg"], cursor="hand2")
+                entry_frame.pack(fill=tk.X, padx=2, pady=1)
+
+                time_lbl = tk.Label(
+                    entry_frame, text=time_str,
+                    bg=COLORS["tooltip_bg"], fg=COLORS["text_dim"],
+                    font=("Segoe UI", 8), width=5,
+                )
+                time_lbl.pack(side=tk.LEFT, padx=(4, 2))
+
+                text_lbl = tk.Label(
+                    entry_frame, text=preview,
+                    bg=COLORS["tooltip_bg"], fg=COLORS["text"],
+                    font=("Segoe UI", 9), anchor="w",
+                )
+                text_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+
+                full_text = text
+                for w in (entry_frame, time_lbl, text_lbl):
+                    w.bind("<Enter>", lambda e, f=entry_frame: f.config(bg=COLORS["surface"]) or
+                           [c.config(bg=COLORS["surface"]) for c in f.winfo_children()])
+                    w.bind("<Leave>", lambda e, f=entry_frame: f.config(bg=COLORS["tooltip_bg"]) or
+                           [c.config(bg=COLORS["tooltip_bg"]) for c in f.winfo_children()])
+                    w.bind("<Button-1>", lambda e, t=full_text: (on_select(t), self.dismiss()))
+
+        x = parent.winfo_rootx()
+        y = parent.winfo_rooty() + parent.winfo_height() + 4
+        self.tw.geometry(f"+{x}+{y}")
+
+        self.tw.bind("<Escape>", lambda e: self.dismiss())
+        self.tw.focus_set()
+        self.tw.bind("<FocusOut>", lambda e: self.parent.after(100, self._check_focus))
+
+    def _check_focus(self):
+        if self.tw and self.tw.winfo_exists():
+            try:
+                focused = self.tw.focus_get()
+                if focused is None or not str(focused).startswith(str(self.tw)):
+                    self.dismiss()
+            except Exception:
+                self.dismiss()
+
+    def dismiss(self):
+        if self.tw:
+            self.tw.destroy()
+            self.tw = None
+
+
 class VoiceTranscribeGUI:
     """Minimalistic always-on-top GUI for voice transcription."""
 
@@ -112,9 +203,8 @@ class VoiceTranscribeGUI:
         self.window = root
 
         self.window.title("Voice Transcribe")
-        self.window.geometry("240x90")
-        self.window.minsize(200, 90)
-        self.window.resizable(True, False)
+        self.window.geometry("260x100")
+        self.window.resizable(False, False)
         self.window.configure(bg=COLORS["bg"])
 
         # Remove OS titlebar
@@ -139,6 +229,16 @@ class VoiceTranscribeGUI:
         self._pulse_after_id = None
         self._pulse_step = 0
         self._tooltip = None
+        self._peak_level = 0.0
+
+        # Transcription options
+        self._language = None  # Auto-detect
+        self._language_name = "Auto"
+        self._translate = False
+
+        # History
+        self._history = []  # List of (datetime, text) tuples
+        self._history_dropdown = None
 
         # Queue for thread-safe UI updates
         self.message_queue = queue.Queue()
@@ -163,7 +263,6 @@ class VoiceTranscribeGUI:
             self.quit_app()
 
     def fix_taskbar_icon(self):
-        """Force taskbar icon on Windows even with overrideredirect."""
         try:
             import ctypes
             self.window.update_idletasks()
@@ -185,7 +284,6 @@ class VoiceTranscribeGUI:
         outer = tk.Frame(self.window, bg=COLORS["bg"])
         outer.pack(fill=tk.BOTH, expand=True)
 
-        # Border effect
         inner = tk.Frame(outer, bg=COLORS["bg"], highlightbackground=COLORS["border"],
                          highlightthickness=1)
         inner.pack(fill=tk.BOTH, expand=True)
@@ -214,7 +312,13 @@ class VoiceTranscribeGUI:
                                                 font=("Segoe UI", 10),
                                                 hover_bg=COLORS["surface"])
         self.pin_btn.config(fg=COLORS["pin_active"])
-        self.pin_btn.pack(side=tk.RIGHT, padx=(0, 0))
+        self.pin_btn.pack(side=tk.RIGHT)
+
+        # History button
+        self.history_btn = self._make_title_button(title_frame, "\u2630", self._show_history,
+                                                    font=("Segoe UI", 10),
+                                                    hover_bg=COLORS["surface"])
+        self.history_btn.pack(side=tk.RIGHT)
 
         # Drag bindings
         for w in (title_frame, title_label):
@@ -222,8 +326,8 @@ class VoiceTranscribeGUI:
             w.bind("<B1-Motion>", self.do_drag)
 
         # Controls area
-        controls = tk.Frame(inner, bg=COLORS["bg"], padx=10, pady=8)
-        controls.pack(fill=tk.BOTH, expand=True)
+        controls = tk.Frame(inner, bg=COLORS["bg"], padx=10, pady=6)
+        controls.pack(fill=tk.X)
 
         # Record button
         self.record_button = tk.Button(
@@ -235,21 +339,25 @@ class VoiceTranscribeGUI:
         )
         self.record_button.pack(side=tk.LEFT, padx=(0, 8))
         self._bind_hover(self.record_button, COLORS["green"], COLORS["green_hover"])
+        self.record_button.bind("<Button-3>", self._show_options_menu)
 
         # Status label
-        hotkey_hint = f"  ({HOTKEY.replace('+', '+')})" if HAS_HOTKEY else ""
         self.status_label = tk.Label(
-            controls, text=f"Ready{hotkey_hint}",
+            controls, text=self._build_status_text("Ready"),
             font=("Segoe UI", 9), fg=COLORS["text_dim"],
             bg=COLORS["bg"], anchor="w",
         )
         self.status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        # Resize grip
-        grip = tk.Frame(inner, bg=COLORS["border"], width=12, height=12, cursor="size_nw_se")
-        grip.place(relx=1.0, rely=1.0, anchor="se")
-        grip.bind("<Button-1>", self._start_resize)
-        grip.bind("<B1-Motion>", self._do_resize)
+        # Audio level meter
+        meter_frame = tk.Frame(inner, bg=COLORS["meter_bg"], height=4, padx=1)
+        meter_frame.pack(fill=tk.X, padx=8, pady=(0, 6))
+        meter_frame.pack_propagate(False)
+
+        self._meter_bar = tk.Frame(meter_frame, bg=COLORS["meter_green"], height=4, width=0)
+        self._meter_bar.place(x=0, y=0, relheight=1.0, width=0)
+
+        self._meter_frame = meter_frame
 
     def _make_title_button(self, parent, text, command, font=None, hover_bg=None, hover_fg=None):
         btn = tk.Button(
@@ -271,16 +379,47 @@ class VoiceTranscribeGUI:
         widget.bind("<Enter>", lambda e: widget.config(bg=widget._hover_bg))
         widget.bind("<Leave>", lambda e: widget.config(bg=widget._normal_bg))
 
-    # ── Resize ───────────────────────────────────────────────────────
+    def _build_status_text(self, base):
+        parts = [base]
+        if HAS_HOTKEY:
+            parts.append(f"({HOTKEY})")
+        lang_tag = self._get_lang_tag()
+        if lang_tag:
+            parts.append(lang_tag)
+        return "  ".join(parts)
 
-    def _start_resize(self, event):
-        self._resize_start_x = event.x_root
-        self._resize_start_w = self.window.winfo_width()
+    def _get_lang_tag(self):
+        tags = []
+        if self._language:
+            tags.append(self._language.upper())
+        if self._translate:
+            tags.append("EN\u2190")
+        if tags:
+            return "[" + " ".join(tags) + "]"
+        return ""
 
-    def _do_resize(self, event):
-        dx = event.x_root - self._resize_start_x
-        new_w = max(200, self._resize_start_w + dx)
-        self.window.geometry(f"{new_w}x{self.window.winfo_height()}")
+    # ── Audio Level Meter ────────────────────────────────────────────
+
+    def _update_meter(self):
+        if not self.is_recording:
+            self._meter_bar.place_configure(width=0)
+            return
+
+        level = min(self._peak_level, 1.0)
+        meter_width = self._meter_frame.winfo_width()
+        bar_width = int(level * meter_width)
+
+        if level > 0.85:
+            color = COLORS["meter_red"]
+        elif level > 0.5:
+            color = COLORS["meter_orange"]
+        else:
+            color = COLORS["meter_green"]
+
+        self._meter_bar.config(bg=color)
+        self._meter_bar.place_configure(width=bar_width)
+
+        self.window.after(50, self._update_meter)
 
     # ── Status & Queue ───────────────────────────────────────────────
 
@@ -300,6 +439,8 @@ class VoiceTranscribeGUI:
                     self.on_transcription_complete(args[0])
                 elif msg_type == "error":
                     self.on_error(args[0])
+                elif msg_type == "level":
+                    self._peak_level = args[0]
         except queue.Empty:
             pass
         self.window.after(100, self.process_queue)
@@ -309,10 +450,64 @@ class VoiceTranscribeGUI:
     def toggle_topmost(self):
         self.always_on_top.set(not self.always_on_top.get())
         self.window.attributes("-topmost", self.always_on_top.get())
-        if self.always_on_top.get():
-            self.pin_btn.config(fg=COLORS["pin_active"])
-        else:
-            self.pin_btn.config(fg=COLORS["pin_inactive"])
+        self.pin_btn.config(
+            fg=COLORS["pin_active"] if self.always_on_top.get() else COLORS["pin_inactive"]
+        )
+
+    # ── Options Menu (Right-click) ───────────────────────────────────
+
+    def _show_options_menu(self, event):
+        menu = tk.Menu(self.window, tearoff=0,
+                       bg=COLORS["tooltip_bg"], fg=COLORS["text"],
+                       activebackground=COLORS["accent"], activeforeground=COLORS["bg"],
+                       font=("Segoe UI", 9))
+
+        # Language submenu
+        lang_menu = tk.Menu(menu, tearoff=0,
+                            bg=COLORS["tooltip_bg"], fg=COLORS["text"],
+                            activebackground=COLORS["accent"], activeforeground=COLORS["bg"],
+                            font=("Segoe UI", 9))
+        for name, code in LANGUAGES:
+            check = "\u2713 " if self._language == code else "   "
+            lang_menu.add_command(
+                label=f"{check}{name}",
+                command=lambda c=code, n=name: self._set_language(c, n),
+            )
+        menu.add_cascade(label="Language", menu=lang_menu)
+
+        # Translate toggle
+        translate_label = "\u2713 Translate to English" if self._translate else "   Translate to English"
+        menu.add_command(label=translate_label, command=self._toggle_translate)
+
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _set_language(self, code, name):
+        self._language = code
+        self._language_name = name
+        self.set_status(self._build_status_text("Ready"), COLORS["text_dim"])
+
+    def _toggle_translate(self):
+        self._translate = not self._translate
+        self.set_status(self._build_status_text("Ready"), COLORS["text_dim"])
+
+    # ── History ──────────────────────────────────────────────────────
+
+    def _show_history(self):
+        if self._history_dropdown:
+            self._history_dropdown.dismiss()
+            self._history_dropdown = None
+            return
+        self._history_dropdown = HistoryDropdown(
+            self.window, self._history, self._copy_from_history
+        )
+
+    def _copy_from_history(self, text):
+        self.window.clipboard_clear()
+        self.window.clipboard_append(text)
+        self.window.update()
+        self.set_status("Copied!", COLORS["green"])
+        self.window.after(2000, lambda: self.set_status(
+            self._build_status_text("Ready"), COLORS["text_dim"]))
 
     # ── Recording ────────────────────────────────────────────────────
 
@@ -327,8 +522,8 @@ class VoiceTranscribeGUI:
         self.stop_event = threading.Event()
         self.frames = []
         self.record_start_time = time.time()
+        self._peak_level = 0.0
 
-        # Update button to stop state
         self.record_button.config(
             text="\u23f9", bg=COLORS["red"],
             activebackground=COLORS["red_hover"],
@@ -339,6 +534,7 @@ class VoiceTranscribeGUI:
         self.set_status("Recording... 0:00", COLORS["red"])
         self._start_timer()
         self._start_pulse()
+        self._update_meter()
 
         self.recording_thread = threading.Thread(target=self.record_audio, daemon=True)
         self.recording_thread.start()
@@ -348,6 +544,8 @@ class VoiceTranscribeGUI:
             self.stop_event.set()
         self._stop_timer()
         self._stop_pulse()
+        self._peak_level = 0.0
+        self._meter_bar.place_configure(width=0)
         self.record_button.config(state=tk.DISABLED)
         self.set_status("Processing...", COLORS["orange"])
 
@@ -384,7 +582,6 @@ class VoiceTranscribeGUI:
         def pulse():
             if not self.is_recording:
                 return
-            # Sinusoidal interpolation between red and red_dark
             t = (math.sin(self._pulse_step * 0.1) + 1) / 2
             r = int(0x8b + (0xf3 - 0x8b) * t)
             g = int(0x3a + (0x8b - 0x3a) * t)
@@ -419,6 +616,11 @@ class VoiceTranscribeGUI:
             while not self.stop_event.is_set():
                 data = self.audio_stream.read(CHUNK, exception_on_overflow=False)
                 self.frames.append(data)
+
+                # Calculate peak level for meter
+                samples = struct.unpack(f"<{CHUNK}h", data)
+                peak = max(abs(s) for s in samples) / 32768.0
+                self.message_queue.put(("level", peak))
 
             if self.frames:
                 import wave
@@ -460,7 +662,10 @@ class VoiceTranscribeGUI:
     def transcribe_audio_bg(self):
         try:
             transcript = transcribe_audio(
-                self.recorded_file, language=None, response_format="text"
+                self.recorded_file,
+                language=self._language,
+                response_format="text",
+                translate=self._translate,
             )
             self.message_queue.put(("transcription_done", transcript.strip()))
         except Exception as e:
@@ -479,17 +684,21 @@ class VoiceTranscribeGUI:
             self.window.clipboard_append(transcript)
             self.window.update()
 
+            # Add to history
+            self._history.append((datetime.now(), transcript))
+            if len(self._history) > MAX_HISTORY:
+                self._history.pop(0)
+
             self._reset_button()
             self.set_status("Copied!", COLORS["green"])
 
-            # Show tooltip with transcript preview
             preview = transcript[:100] + ("..." if len(transcript) > 100 else "")
             if self._tooltip:
                 self._tooltip.dismiss()
             self._tooltip = Tooltip(self.window, preview, duration=4000)
 
             self.window.after(3000, lambda: self.set_status(
-                f"Ready  ({HOTKEY})" if HAS_HOTKEY else "Ready", COLORS["text_dim"]))
+                self._build_status_text("Ready"), COLORS["text_dim"]))
         except Exception as e:
             self.on_error(f"Clipboard error: {e}")
 
@@ -497,6 +706,8 @@ class VoiceTranscribeGUI:
         self.is_recording = False
         self._stop_timer()
         self._stop_pulse()
+        self._peak_level = 0.0
+        self._meter_bar.place_configure(width=0)
         self._reset_button()
         self.set_status("Error", COLORS["red"])
         messagebox.showerror("Error", error_msg)
@@ -507,7 +718,7 @@ class VoiceTranscribeGUI:
             except Exception:
                 pass
             self.recorded_file = None
-        self.set_status(f"Ready  ({HOTKEY})" if HAS_HOTKEY else "Ready", COLORS["text_dim"])
+        self.set_status(self._build_status_text("Ready"), COLORS["text_dim"])
 
     # ── Drag ─────────────────────────────────────────────────────────
 
@@ -531,11 +742,9 @@ class VoiceTranscribeGUI:
             pass
 
     def _hotkey_triggered(self):
-        # Schedule on tkinter main thread
         self.window.after(0, self._hotkey_action)
 
     def _hotkey_action(self):
-        # Restore window if hidden
         if not self.window.winfo_viewable():
             self.window.deiconify()
             self.window.attributes("-topmost", self.always_on_top.get())
@@ -571,8 +780,7 @@ class VoiceTranscribeGUI:
         )
 
         self._tray_icon = pystray.Icon("voicetranscribe", image, "Voice Transcribe", menu)
-        tray_thread = threading.Thread(target=self._tray_icon.run, daemon=True)
-        tray_thread.start()
+        threading.Thread(target=self._tray_icon.run, daemon=True).start()
 
     def _tray_toggle_window(self, icon=None, item=None):
         self.window.after(0, self._toggle_visibility)
@@ -593,14 +801,12 @@ class VoiceTranscribeGUI:
     # ── Close / Quit ─────────────────────────────────────────────────
 
     def on_close(self):
-        """Close button minimizes to tray if available, otherwise quits."""
         if self._tray_icon:
             self.window.withdraw()
         else:
             self.quit_app()
 
     def quit_app(self):
-        """Full shutdown."""
         if self.is_recording and self.stop_event:
             self.stop_event.set()
         self._stop_timer()
