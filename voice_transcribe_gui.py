@@ -5,6 +5,7 @@ Always-on-top window with record button and auto-clipboard copy.
 """
 import sys
 import os
+import json
 import math
 import time
 import struct
@@ -14,12 +15,15 @@ import tkinter as tk
 from tkinter import messagebox
 from datetime import datetime
 import queue
+import ctypes
+import winsound
 
 from voice_transcribe import (
     ensure_utf8_mode,
     get_api_key,
     transcribe_audio,
-    convert_to_mp3
+    convert_to_mp3,
+    AUDIO_EXTENSIONS,
 )
 
 try:
@@ -40,6 +44,12 @@ try:
     HAS_HOTKEY = True
 except ImportError:
     HAS_HOTKEY = False
+
+try:
+    import windnd
+    HAS_DND = True
+except ImportError:
+    HAS_DND = False
 
 # Sleek dark color palette
 COLORS = {
@@ -65,6 +75,8 @@ COLORS = {
     "meter_green": "#a6e3a1",
     "meter_orange": "#fab387",
     "meter_red": "#f38ba8",
+    "progress_bg": "#11111b",
+    "progress_fg": "#89b4fa",
 }
 
 HOTKEY = "ctrl+shift+r"
@@ -85,6 +97,29 @@ LANGUAGES = [
 ]
 
 MAX_HISTORY = 20
+SETTINGS_DIR = os.path.join(os.path.expanduser("~"), ".config", "voicetranscribe")
+SETTINGS_FILE = os.path.join(SETTINGS_DIR, "settings.json")
+
+IDLE_ALPHA = 0.45
+ACTIVE_ALPHA = 1.0
+ALPHA_STEP = 0.08
+
+
+def load_settings():
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_settings(data):
+    try:
+        os.makedirs(SETTINGS_DIR, exist_ok=True)
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
 
 
 class Tooltip:
@@ -202,6 +237,9 @@ class VoiceTranscribeGUI:
         self.root = root
         self.window = root
 
+        # Load persisted settings
+        self._settings = load_settings()
+
         self.window.title("Voice Transcribe")
         self.window.geometry("260x100")
         self.window.resizable(False, False)
@@ -218,6 +256,7 @@ class VoiceTranscribeGUI:
 
         # Recording state
         self.is_recording = False
+        self.is_processing = False
         self.stop_event = None
         self.recording_thread = None
         self.recorded_file = None
@@ -230,14 +269,21 @@ class VoiceTranscribeGUI:
         self._pulse_step = 0
         self._tooltip = None
         self._peak_level = 0.0
+        self._progress_after_id = None
+        self._progress_pos = 0
 
-        # Transcription options
-        self._language = None  # Auto-detect
-        self._language_name = "Auto"
-        self._translate = False
+        # Capture the foreground window before we take focus
+        self._previous_hwnd = None
+
+        # Transcription options (restore from settings)
+        self._language = self._settings.get("language", None)
+        self._language_name = self._settings.get("language_name", "Auto")
+        self._translate = self._settings.get("translate", False)
+        self._auto_paste = self._settings.get("auto_paste", True)
+        self._transparent_idle = self._settings.get("transparent_idle", True)
 
         # History
-        self._history = []  # List of (datetime, text) tuples
+        self._history = []
         self._history_dropdown = None
 
         # Queue for thread-safe UI updates
@@ -247,6 +293,12 @@ class VoiceTranscribeGUI:
         self._drag_start_x = 0
         self._drag_start_y = 0
 
+        # Transparency state
+        self._target_alpha = IDLE_ALPHA if self._transparent_idle else ACTIVE_ALPHA
+        self._current_alpha = ACTIVE_ALPHA
+        self._fade_after_id = None
+        self._mouse_inside = False
+
         # Tray icon
         self._tray_icon = None
 
@@ -254,6 +306,16 @@ class VoiceTranscribeGUI:
         self.process_queue()
         self._setup_hotkey()
         self._setup_tray()
+        self._setup_dnd()
+        self._restore_position()
+
+        # Start idle transparency after a brief delay
+        if self._transparent_idle:
+            self.window.after(2000, self._fade_to_idle)
+
+        # Track mouse enter/leave on the whole window for transparency
+        self.window.bind("<Enter>", self._on_mouse_enter)
+        self.window.bind("<Leave>", self._on_mouse_leave)
 
         # Verify API key
         try:
@@ -264,7 +326,6 @@ class VoiceTranscribeGUI:
 
     def fix_taskbar_icon(self):
         try:
-            import ctypes
             self.window.update_idletasks()
             hwnd = ctypes.windll.user32.GetParent(self.window.winfo_id())
             GWL_EXSTYLE = -20
@@ -277,6 +338,30 @@ class VoiceTranscribeGUI:
             self.window.deiconify()
         except Exception:
             pass
+
+    # ── Settings Persistence ─────────────────────────────────────────
+
+    def _save_settings(self):
+        data = {
+            "language": self._language,
+            "language_name": self._language_name,
+            "translate": self._translate,
+            "auto_paste": self._auto_paste,
+            "transparent_idle": self._transparent_idle,
+            "window_x": self.window.winfo_x(),
+            "window_y": self.window.winfo_y(),
+        }
+        save_settings(data)
+
+    def _restore_position(self):
+        x = self._settings.get("window_x")
+        y = self._settings.get("window_y")
+        if x is not None and y is not None:
+            # Validate position is on screen
+            screen_w = self.window.winfo_screenwidth()
+            screen_h = self.window.winfo_screenheight()
+            if -50 < x < screen_w - 50 and -50 < y < screen_h - 50:
+                self.window.geometry(f"+{x}+{y}")
 
     # ── UI Construction ──────────────────────────────────────────────
 
@@ -349,15 +434,18 @@ class VoiceTranscribeGUI:
         )
         self.status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        # Audio level meter
-        meter_frame = tk.Frame(inner, bg=COLORS["meter_bg"], height=4, padx=1)
-        meter_frame.pack(fill=tk.X, padx=8, pady=(0, 6))
-        meter_frame.pack_propagate(False)
+        # Meter / progress bar area
+        self._bar_frame = tk.Frame(inner, bg=COLORS["meter_bg"], height=4)
+        self._bar_frame.pack(fill=tk.X, padx=8, pady=(0, 6))
+        self._bar_frame.pack_propagate(False)
 
-        self._meter_bar = tk.Frame(meter_frame, bg=COLORS["meter_green"], height=4, width=0)
+        # Level meter bar (used during recording)
+        self._meter_bar = tk.Frame(self._bar_frame, bg=COLORS["meter_green"], height=4, width=0)
         self._meter_bar.place(x=0, y=0, relheight=1.0, width=0)
 
-        self._meter_frame = meter_frame
+        # Progress bar (used during transcription)
+        self._progress_bar = tk.Frame(self._bar_frame, bg=COLORS["progress_fg"], height=4, width=0)
+        self._progress_bar.place(x=0, y=0, relheight=1.0, width=0)
 
     def _make_title_button(self, parent, text, command, font=None, hover_bg=None, hover_fg=None):
         btn = tk.Button(
@@ -398,6 +486,47 @@ class VoiceTranscribeGUI:
             return "[" + " ".join(tags) + "]"
         return ""
 
+    # ── Transparency ─────────────────────────────────────────────────
+
+    def _on_mouse_enter(self, event):
+        self._mouse_inside = True
+        if self._transparent_idle:
+            self._fade_to(ACTIVE_ALPHA)
+
+    def _on_mouse_leave(self, event):
+        self._mouse_inside = False
+        if self._transparent_idle and not self.is_recording and not self.is_processing:
+            self.window.after(300, self._check_fade_to_idle)
+
+    def _check_fade_to_idle(self):
+        if not self._mouse_inside and not self.is_recording and not self.is_processing:
+            self._fade_to(IDLE_ALPHA)
+
+    def _fade_to_idle(self):
+        if not self._mouse_inside and not self.is_recording and not self.is_processing:
+            self._fade_to(IDLE_ALPHA)
+
+    def _fade_to(self, target):
+        self._target_alpha = target
+        if self._fade_after_id:
+            self.window.after_cancel(self._fade_after_id)
+        self._do_fade()
+
+    def _do_fade(self):
+        if abs(self._current_alpha - self._target_alpha) < ALPHA_STEP:
+            self._current_alpha = self._target_alpha
+            self.window.attributes("-alpha", self._current_alpha)
+            self._fade_after_id = None
+            return
+
+        if self._current_alpha < self._target_alpha:
+            self._current_alpha = min(self._current_alpha + ALPHA_STEP, self._target_alpha)
+        else:
+            self._current_alpha = max(self._current_alpha - ALPHA_STEP, self._target_alpha)
+
+        self.window.attributes("-alpha", self._current_alpha)
+        self._fade_after_id = self.window.after(30, self._do_fade)
+
     # ── Audio Level Meter ────────────────────────────────────────────
 
     def _update_meter(self):
@@ -406,7 +535,7 @@ class VoiceTranscribeGUI:
             return
 
         level = min(self._peak_level, 1.0)
-        meter_width = self._meter_frame.winfo_width()
+        meter_width = self._bar_frame.winfo_width()
         bar_width = int(level * meter_width)
 
         if level > 0.85:
@@ -420,6 +549,28 @@ class VoiceTranscribeGUI:
         self._meter_bar.place_configure(width=bar_width)
 
         self.window.after(50, self._update_meter)
+
+    # ── Progress Bar (indeterminate) ─────────────────────────────────
+
+    def _start_progress(self):
+        self._progress_pos = 0
+        self._meter_bar.place_configure(width=0)
+
+        def animate():
+            bar_width = self._bar_frame.winfo_width()
+            seg_width = max(40, bar_width // 4)
+            x = int((self._progress_pos % (bar_width + seg_width)) - seg_width)
+            self._progress_bar.place_configure(x=x, width=seg_width)
+            self._progress_pos += 3
+            self._progress_after_id = self.window.after(30, animate)
+
+        self._progress_after_id = self.window.after(30, animate)
+
+    def _stop_progress(self):
+        if self._progress_after_id:
+            self.window.after_cancel(self._progress_after_id)
+            self._progress_after_id = None
+        self._progress_bar.place_configure(width=0)
 
     # ── Status & Queue ───────────────────────────────────────────────
 
@@ -476,19 +627,43 @@ class VoiceTranscribeGUI:
         menu.add_cascade(label="Language", menu=lang_menu)
 
         # Translate toggle
-        translate_label = "\u2713 Translate to English" if self._translate else "   Translate to English"
-        menu.add_command(label=translate_label, command=self._toggle_translate)
+        tr_check = "\u2713 " if self._translate else "   "
+        menu.add_command(label=f"{tr_check}Translate to English", command=self._toggle_translate)
+
+        menu.add_separator()
+
+        # Auto-paste toggle
+        ap_check = "\u2713 " if self._auto_paste else "   "
+        menu.add_command(label=f"{ap_check}Auto-paste", command=self._toggle_auto_paste)
+
+        # Transparency toggle
+        tp_check = "\u2713 " if self._transparent_idle else "   "
+        menu.add_command(label=f"{tp_check}Transparent when idle", command=self._toggle_transparency)
 
         menu.tk_popup(event.x_root, event.y_root)
 
     def _set_language(self, code, name):
         self._language = code
         self._language_name = name
+        self._save_settings()
         self.set_status(self._build_status_text("Ready"), COLORS["text_dim"])
 
     def _toggle_translate(self):
         self._translate = not self._translate
+        self._save_settings()
         self.set_status(self._build_status_text("Ready"), COLORS["text_dim"])
+
+    def _toggle_auto_paste(self):
+        self._auto_paste = not self._auto_paste
+        self._save_settings()
+
+    def _toggle_transparency(self):
+        self._transparent_idle = not self._transparent_idle
+        self._save_settings()
+        if self._transparent_idle:
+            self._fade_to_idle()
+        else:
+            self._fade_to(ACTIVE_ALPHA)
 
     # ── History ──────────────────────────────────────────────────────
 
@@ -509,6 +684,86 @@ class VoiceTranscribeGUI:
         self.window.after(2000, lambda: self.set_status(
             self._build_status_text("Ready"), COLORS["text_dim"]))
 
+    # ── Drag & Drop ──────────────────────────────────────────────────
+
+    def _setup_dnd(self):
+        if not HAS_DND:
+            return
+        try:
+            windnd.hook_dropfiles(self.window, func=self._on_files_dropped)
+        except Exception:
+            pass
+
+    def _on_files_dropped(self, file_list):
+        # windnd returns list of bytes paths
+        for raw_path in file_list:
+            path = raw_path.decode("utf-8") if isinstance(raw_path, bytes) else raw_path
+            ext = os.path.splitext(path)[1].lower()
+            if ext in AUDIO_EXTENSIONS:
+                self._transcribe_file(path)
+                return
+        self.set_status("Unsupported file type", COLORS["red"])
+        self.window.after(2000, lambda: self.set_status(
+            self._build_status_text("Ready"), COLORS["text_dim"]))
+
+    def _transcribe_file(self, path):
+        if self.is_recording or self.is_processing:
+            return
+        self.is_processing = True
+        self._capture_previous_window()
+        self.record_button.config(state=tk.DISABLED)
+        self.set_status("Transcribing file...", COLORS["blue"])
+        self._start_progress()
+        self._fade_to(ACTIVE_ALPHA)
+
+        def do_transcribe():
+            try:
+                transcript = transcribe_audio(
+                    path, language=self._language,
+                    response_format="text", translate=self._translate,
+                )
+                self.message_queue.put(("transcription_done", transcript.strip()))
+            except Exception as e:
+                self.message_queue.put(("error", f"Transcription failed: {e}"))
+
+        threading.Thread(target=do_transcribe, daemon=True).start()
+
+    # ── Auto-paste ───────────────────────────────────────────────────
+
+    def _capture_previous_window(self):
+        try:
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            # Don't capture our own window
+            our_hwnd = ctypes.windll.user32.GetParent(self.window.winfo_id())
+            if hwnd != our_hwnd and hwnd != 0:
+                self._previous_hwnd = hwnd
+            else:
+                self._previous_hwnd = None
+        except Exception:
+            self._previous_hwnd = None
+
+    def _do_auto_paste(self):
+        if not self._auto_paste or not HAS_HOTKEY or not self._previous_hwnd:
+            return
+
+        try:
+            # Check if the window still exists
+            if not ctypes.windll.user32.IsWindow(self._previous_hwnd):
+                return
+
+            # Set focus to the previous window
+            ctypes.windll.user32.SetForegroundWindow(self._previous_hwnd)
+
+            # Small delay to let focus switch complete
+            time.sleep(0.15)
+
+            # Simulate Ctrl+V
+            kb.send("ctrl+v")
+        except Exception:
+            pass
+        finally:
+            self._previous_hwnd = None
+
     # ── Recording ────────────────────────────────────────────────────
 
     def toggle_recording(self):
@@ -518,11 +773,15 @@ class VoiceTranscribeGUI:
             self.stop_recording()
 
     def start_recording(self):
+        self._capture_previous_window()
         self.is_recording = True
         self.stop_event = threading.Event()
         self.frames = []
         self.record_start_time = time.time()
         self._peak_level = 0.0
+
+        # Go fully opaque while recording
+        self._fade_to(ACTIVE_ALPHA)
 
         self.record_button.config(
             text="\u23f9", bg=COLORS["red"],
@@ -617,7 +876,6 @@ class VoiceTranscribeGUI:
                 data = self.audio_stream.read(CHUNK, exception_on_overflow=False)
                 self.frames.append(data)
 
-                # Calculate peak level for meter
                 samples = struct.unpack(f"<{CHUNK}h", data)
                 peak = max(abs(s) for s in samples) / 32768.0
                 self.message_queue.put(("level", peak))
@@ -656,7 +914,9 @@ class VoiceTranscribeGUI:
 
     def on_recording_complete(self):
         self.is_recording = False
+        self.is_processing = True
         self.set_status("Transcribing...", COLORS["blue"])
+        self._start_progress()
         threading.Thread(target=self.transcribe_audio_bg, daemon=True).start()
 
     def transcribe_audio_bg(self):
@@ -679,6 +939,9 @@ class VoiceTranscribeGUI:
                 self.recorded_file = None
 
     def on_transcription_complete(self, transcript):
+        self.is_processing = False
+        self._stop_progress()
+
         try:
             self.window.clipboard_clear()
             self.window.clipboard_append(transcript)
@@ -692,20 +955,45 @@ class VoiceTranscribeGUI:
             self._reset_button()
             self.set_status("Copied!", COLORS["green"])
 
+            # Play completion sound
+            try:
+                winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
+            except Exception:
+                pass
+
+            # Tray notification if minimized
+            if self._tray_icon and not self.window.winfo_viewable():
+                try:
+                    preview = transcript[:80] + ("..." if len(transcript) > 80 else "")
+                    self._tray_icon.notify("Transcription complete", preview)
+                except Exception:
+                    pass
+
+            # Show tooltip
             preview = transcript[:100] + ("..." if len(transcript) > 100 else "")
             if self._tooltip:
                 self._tooltip.dismiss()
             self._tooltip = Tooltip(self.window, preview, duration=4000)
 
+            # Auto-paste in background thread (has a small sleep)
+            if self._auto_paste and self._previous_hwnd:
+                threading.Thread(target=self._do_auto_paste, daemon=True).start()
+
+            # Fade to idle after a delay
             self.window.after(3000, lambda: self.set_status(
                 self._build_status_text("Ready"), COLORS["text_dim"]))
+            if self._transparent_idle:
+                self.window.after(4000, self._check_fade_to_idle)
+
         except Exception as e:
             self.on_error(f"Clipboard error: {e}")
 
     def on_error(self, error_msg):
         self.is_recording = False
+        self.is_processing = False
         self._stop_timer()
         self._stop_pulse()
+        self._stop_progress()
         self._peak_level = 0.0
         self._meter_bar.place_configure(width=0)
         self._reset_button()
@@ -719,6 +1007,8 @@ class VoiceTranscribeGUI:
                 pass
             self.recorded_file = None
         self.set_status(self._build_status_text("Ready"), COLORS["text_dim"])
+        if self._transparent_idle:
+            self.window.after(1000, self._check_fade_to_idle)
 
     # ── Drag ─────────────────────────────────────────────────────────
 
@@ -801,16 +1091,20 @@ class VoiceTranscribeGUI:
     # ── Close / Quit ─────────────────────────────────────────────────
 
     def on_close(self):
+        self._save_settings()
         if self._tray_icon:
             self.window.withdraw()
         else:
             self.quit_app()
 
     def quit_app(self):
+        self._save_settings()
+
         if self.is_recording and self.stop_event:
             self.stop_event.set()
         self._stop_timer()
         self._stop_pulse()
+        self._stop_progress()
         self._remove_hotkey()
 
         if self.audio_stream:
