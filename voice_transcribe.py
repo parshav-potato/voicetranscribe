@@ -51,7 +51,7 @@ CHUNK_OVERLAP = 5     # 5 second overlap between chunks to avoid splitting mid-w
 ROOT_URL = "https://api.siemens.com/llm/v1"
 
 # Directory for saving recordings and transcriptions
-SAVE_DIRECTORY = r"C:\Users\ms6vj5\OneDrive - Siemens AG\Documents\Sound Recordings"
+SAVE_DIRECTORY = os.path.join(os.path.expanduser("~"), "Documents", "Sound Recordings")
 
 def convert_to_mp3(audio_path: str) -> str:
     """Convert audio file to mp3 format using ffmpeg.
@@ -521,6 +521,14 @@ def transcribe_audio(audio_path: str, language: str = None, prompt: str = None,
             
             # For non-json formats, return raw text
             if response_format in ("text", "srt", "vtt"):
+                # Some API endpoints return JSON even for text format
+                text = response.text.strip()
+                if response_format == "text" and text.startswith('{'):
+                    try:
+                        data = json.loads(text)
+                        return data.get("text", text)
+                    except (json.JSONDecodeError, AttributeError):
+                        pass
                 return response.text
             
             result = response.json()
@@ -739,7 +747,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="List all available audio devices and exit.")
     return parser
 
-if __name__ == "__main__":
+def main():
     ensure_utf8_mode()
 
     parser = build_parser()
@@ -761,7 +769,7 @@ if __name__ == "__main__":
         if not os.access(inname, os.R_OK):
             print("Cannot read input file", file=sys.stderr)
             sys.exit(2)
-    
+
     # Validate output file
     if outname != "-" and not (os.access(outname, os.W_OK) or os.access(os.path.dirname(outname) or ".", os.W_OK)):
         print("Cannot write output file", file=sys.stderr)
@@ -783,3 +791,6 @@ if __name__ == "__main__":
     finally:
         if outfile is not None and outfile != sys.stdout:
             outfile.close()
+
+if __name__ == "__main__":
+    main()

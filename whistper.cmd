@@ -1,2 +1,2 @@
 @echo off
-python -X utf8 "%~dp0whistper.py" %*
+uv run python "%~dp0voice_transcribe.py" %*

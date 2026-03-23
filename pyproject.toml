@@ -1,0 +1,16 @@
+[project]
+name = "voicetranscribe"
+version = "0.1.0"
+description = "Minimalistic voice transcription tool using Whisper API with GUI and CLI"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "keyboard>=0.13.5",
+    "pillow>=12.1.1",
+    "pyaudio>=0.2.14",
+    "pystray>=0.19.5",
+    "requests>=2.32.5",
+]
+
+[dependency-groups]
+dev = []
