@@ -1,7 +1,23 @@
-.venv/
-__pycache__/
-*.pyc
-*.pyo
-*.egg-info/
-dist/
-build/
+# .NET build output
+bin/
+obj/
+
+# IDE
+.vs/
+*.user
+*.suo
+*.sln.docstates
+
+# NuGet
+packages/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Rider
+.idea/
+
+# Temporary files
+*.tmp
+*.log

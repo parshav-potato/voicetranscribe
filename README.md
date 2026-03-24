@@ -1,91 +1,62 @@
 # VoiceTranscribe
 
-Minimalistic voice transcription tool using the Whisper API (via Siemens LLM gateway). Includes a small always-on-top GUI and a full-featured CLI.
+Windows voice transcription tool using the Whisper API via a Siemens LLM gateway. Includes a WPF GUI and a CLI, built on .NET 10.
 
 ## Prerequisites
 
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) (Python package manager)
-- [ffmpeg](https://ffmpeg.org/download.html) on PATH (for audio conversion) — install with `winget install ffmpeg`
-- API key saved to `~/.secret/siemens_api_key`
+- [.NET 10 SDK](https://dotnet.microsoft.com/download)
+- [ffmpeg](https://ffmpeg.org/download.html) on PATH (for audio conversion) -- install with `winget install ffmpeg`
 
-## Setup
+## Build
 
 ```sh
-git clone https://code.siemens.com/gert.massa/voicetranscribe.git
-cd voicetranscribe
-uv sync
+dotnet build
 ```
-
-`uv sync` installs Python (if needed) and all dependencies into a local `.venv`.
 
 ## Usage
 
 ### GUI
 
 ```sh
-uv run python voice_transcribe_gui.py
+dotnet run --project src/VoiceTranscribe.Gui
 ```
 
-Or on Windows, double-click `whistper_gui.cmd`.
-
-The GUI is a small always-on-top window:
-- Click the microphone button to start recording
-- Click the stop button to finish
-- The transcription is automatically copied to your clipboard
+Features: always-on-top window, global hotkey (Ctrl+Shift+R), system tray, drag-and-drop audio files, auto-paste to active window, idle transparency.
 
 ### CLI
 
-Record from microphone and print transcription to stdout:
+Record from microphone:
 
 ```sh
-uv run python voice_transcribe.py
+dotnet run --project src/VoiceTranscribe.Cli
 ```
 
 Transcribe an audio file:
 
 ```sh
-uv run python voice_transcribe.py recording.mp3
+dotnet run --project src/VoiceTranscribe.Cli -- recording.mp3
 ```
 
-Transcribe to a file with subtitle format:
+Transcribe with options:
 
 ```sh
-uv run python voice_transcribe.py recording.mp3 output.srt -f srt
-```
-
-Translate to English:
-
-```sh
-uv run python voice_transcribe.py recording.mp3 --translate
-```
-
-Record system audio (Windows, requires PyAudioWPatch):
-
-```sh
-uv run python voice_transcribe.py --loopback
+dotnet run --project src/VoiceTranscribe.Cli -- recording.mp3 output.srt -f srt --translate
 ```
 
 List audio devices:
 
 ```sh
-uv run python voice_transcribe.py --list-devices
+dotnet run --project src/VoiceTranscribe.Cli -- --list-devices
 ```
 
-### CLI Options
+## API Key
 
-| Option | Description |
-|---|---|
-| `-l`, `--language` | ISO-639-1 language code (e.g. `en`, `de`). Omit for auto-detect |
-| `-p`, `--prompt` | Guide the model with context (names, terms, style) |
-| `-f`, `--format` | Output format: `json`, `text`, `srt`, `vtt`, `verbose_json` |
-| `-t`, `--temperature` | Sampling temperature 0-1 (lower = more deterministic) |
-| `--translate` | Translate audio to English |
-| `--loopback` | Record system audio instead of microphone (Windows/WASAPI) |
-| `-d`, `--device` | Record from a specific audio device index |
-| `--list-devices` | List available audio devices and exit |
+Create `~/.secret/siemens_api_key` with your Siemens API key.
 
-## How it works
+## Architecture
 
-Audio is recorded via PyAudio, converted to MP3 with ffmpeg, and sent to the Whisper API (`whisper-large-v3-turbo` model). Large files are automatically split into 10-minute chunks with overlap to avoid cutting words at boundaries.
+Three-project solution:
 
-Live recordings are saved to `~/Documents/Sound Recordings/` with timestamps.
+- **VoiceTranscribe.Core** -- Shared library. Transcription pipeline, audio conversion, chunking, API client.
+- **VoiceTranscribe.Cli** -- Console app. Command-line argument parsing and microphone/loopback recording.
+- **VoiceTranscribe.Gui** -- WPF app. Dark themed UI with system tray, global hotkey, drag-and-drop, and auto-paste.

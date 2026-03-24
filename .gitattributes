@@ -1,2 +1,17 @@
-# Auto detect text files and normalize line endings to LF
+# Auto detect text files and perform LF normalization
 * text=auto eol=lf
+
+# C# source
+*.cs text diff=csharp
+*.csproj text
+*.sln text
+*.xaml text
+
+# Resources
+*.ico binary
+*.png binary
+
+# Config
+*.json text
+*.xml text
+*.props text
