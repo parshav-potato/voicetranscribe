@@ -1,0 +1,230 @@
+<Window x:Class="VoiceTranscribe.Gui.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
+        xmlns:vm="clr-namespace:VoiceTranscribe.Gui.ViewModels"
+        xmlns:conv="clr-namespace:VoiceTranscribe.Gui.Converters"
+        Title="Voice Transcribe"
+        Width="260" Height="100"
+        ResizeMode="NoResize"
+        WindowStyle="None"
+        Topmost="{Binding IsAlwaysOnTop}"
+        AllowDrop="True"
+        Background="{StaticResource BgBrush}"
+        FontFamily="Segoe UI"
+        Icon="Resources/microphone_icon.ico"
+        Drop="OnFileDrop"
+        DragOver="OnDragOver">
+
+    <Window.DataContext>
+        <vm:MainViewModel />
+    </Window.DataContext>
+
+    <Window.Resources>
+        <conv:BoolToRecordIconConverter x:Key="BoolToRecordIcon" />
+        <conv:LevelToWidthConverter x:Key="LevelToWidth" />
+        <BooleanToVisibilityConverter x:Key="BoolToVis" />
+    </Window.Resources>
+
+    <shell:WindowChrome.WindowChrome>
+        <shell:WindowChrome CaptionHeight="24"
+                            ResizeBorderThickness="0"
+                            GlassFrameThickness="0"
+                            CornerRadius="0" />
+    </shell:WindowChrome.WindowChrome>
+
+    <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="24" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="4" />
+            </Grid.RowDefinitions>
+
+            <!-- Row 0: Custom Titlebar -->
+            <Border Grid.Row="0" Background="{StaticResource TitlebarBrush}">
+                <DockPanel LastChildFill="True">
+                    <!-- Right-side buttons (Close, Pin, History) -->
+                    <Button x:Name="CloseButton"
+                            DockPanel.Dock="Right"
+                            Content="&#x00D7;"
+                            Style="{StaticResource CloseButtonStyle}"
+                            shell:WindowChrome.IsHitTestVisibleInChrome="True"
+                            Click="OnCloseClick" />
+
+                    <Button x:Name="PinButton"
+                            DockPanel.Dock="Right"
+                            Content="&#x25CF;"
+                            shell:WindowChrome.IsHitTestVisibleInChrome="True"
+                            Command="{Binding ToggleAlwaysOnTopCommand}">
+                        <Button.ToolTip>
+                            <ToolTip Style="{StaticResource DarkToolTipStyle}"
+                                     Content="Toggle always on top" />
+                        </Button.ToolTip>
+                        <Button.Style>
+                            <Style TargetType="Button" BasedOn="{StaticResource PinButtonStyle}">
+                                <Setter Property="Foreground" Value="{StaticResource PinInactiveBrush}" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsAlwaysOnTop}" Value="True">
+                                        <Setter Property="Foreground" Value="{StaticResource PinActiveBrush}" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
+                    </Button>
+
+                    <Button x:Name="HistoryButton"
+                            DockPanel.Dock="Right"
+                            Content="&#x2630;"
+                            Style="{StaticResource TitleBarButtonStyle}"
+                            shell:WindowChrome.IsHitTestVisibleInChrome="True"
+                            Click="OnHistoryClick">
+                        <Button.ToolTip>
+                            <ToolTip Style="{StaticResource DarkToolTipStyle}"
+                                     Content="Transcription history" />
+                        </Button.ToolTip>
+                    </Button>
+
+                    <!-- Left: Title text -->
+                    <TextBlock Text="Voice Transcribe"
+                               Foreground="{StaticResource TextDimBrush}"
+                               FontSize="11"
+                               VerticalAlignment="Center"
+                               Margin="8,0,0,0" />
+                </DockPanel>
+            </Border>
+
+            <!-- Row 1: Controls -->
+            <StackPanel Grid.Row="1"
+                        Orientation="Horizontal"
+                        Margin="10,6,10,6"
+                        VerticalAlignment="Center">
+
+                <!-- Record/Stop Button with right-click context menu -->
+                <Button x:Name="RecordButton"
+                        Style="{StaticResource RecordButtonStyle}"
+                        Command="{Binding ToggleRecordingCommand}"
+                        IsEnabled="{Binding IsRecordButtonEnabled}"
+                        Content="{Binding ShowStopIcon, Converter={StaticResource BoolToRecordIcon}}"
+                        Margin="0,0,8,0">
+                    <Button.ContextMenu>
+                        <ContextMenu x:Name="OptionsMenu"
+                                     Style="{StaticResource DarkContextMenuStyle}"
+                                     Opened="OnOptionsMenuOpened">
+                            <!-- Language submenu - items built in code-behind -->
+                            <MenuItem x:Name="LanguageMenu"
+                                      Header="Language"
+                                      Style="{StaticResource DarkMenuItemStyle}" />
+
+                            <MenuItem Header="Translate to English"
+                                      Style="{StaticResource DarkMenuItemStyle}"
+                                      IsCheckable="True"
+                                      IsChecked="{Binding TranslateToEnglish}" />
+
+                            <Separator />
+
+                            <MenuItem Header="Set Prompt..."
+                                      Style="{StaticResource DarkMenuItemStyle}"
+                                      Command="{Binding SetPromptCommand}" />
+
+                            <Separator />
+
+                            <MenuItem Header="Auto-paste"
+                                      Style="{StaticResource DarkMenuItemStyle}"
+                                      IsCheckable="True"
+                                      IsChecked="{Binding AutoPasteEnabled}" />
+
+                            <MenuItem Header="Transparent when idle"
+                                      Style="{StaticResource DarkMenuItemStyle}"
+                                      IsCheckable="True"
+                                      IsChecked="{Binding TransparentWhenIdle}" />
+                        </ContextMenu>
+                    </Button.ContextMenu>
+                </Button>
+
+                <!-- Status Text -->
+                <TextBlock Text="{Binding StatusText}"
+                           Foreground="{Binding StatusBrush}"
+                           FontSize="12"
+                           VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis" />
+            </StackPanel>
+
+            <!-- Row 2: Meter/Progress area -->
+            <Border Grid.Row="2"
+                    Background="{StaticResource MeterBgBrush}"
+                    Margin="8,0,8,6">
+                <Grid x:Name="MeterContainer">
+                    <!-- Audio Level Meter (visible when recording) -->
+                    <Border x:Name="LevelMeter"
+                            Background="{StaticResource MeterGreenBrush}"
+                            HorizontalAlignment="Left"
+                            Visibility="{Binding IsRecording, Converter={StaticResource BoolToVis}}">
+                        <Border.Width>
+                            <MultiBinding Converter="{StaticResource LevelToWidth}">
+                                <Binding Path="AudioLevel" />
+                                <Binding Path="ActualWidth" ElementName="MeterContainer" />
+                            </MultiBinding>
+                        </Border.Width>
+                    </Border>
+
+                    <!-- Progress Bar (visible when processing) -->
+                    <ProgressBar x:Name="TranscriptionProgress"
+                                 IsIndeterminate="{Binding IsProgressIndeterminate}"
+                                 Value="{Binding ProgressValue}"
+                                 Minimum="0" Maximum="100"
+                                 Foreground="{StaticResource ProgressFgBrush}"
+                                 Background="Transparent"
+                                 BorderThickness="0"
+                                 Height="4"
+                                 Visibility="{Binding IsProcessing, Converter={StaticResource BoolToVis}}" />
+                </Grid>
+            </Border>
+
+            <!-- History Popup -->
+            <Popup x:Name="HistoryPopup"
+                   PlacementTarget="{Binding ElementName=HistoryButton}"
+                   Placement="Bottom"
+                   StaysOpen="False"
+                   AllowsTransparency="True">
+                <Border Background="{StaticResource TooltipBgBrush}"
+                        BorderBrush="{StaticResource BorderBrush}"
+                        BorderThickness="1"
+                        Padding="2"
+                        MaxWidth="300"
+                        MaxHeight="300">
+                    <ItemsControl ItemsSource="{Binding History}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border x:Name="EntryBorder"
+                                        Padding="4,3"
+                                        Cursor="Hand"
+                                        Background="Transparent"
+                                        MouseLeftButtonUp="OnHistoryItemClick">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="{Binding TimeString}"
+                                                   Foreground="{StaticResource TextDimBrush}"
+                                                   FontSize="10"
+                                                   Width="40"
+                                                   VerticalAlignment="Center" />
+                                        <TextBlock Text="{Binding Preview}"
+                                                   Foreground="{StaticResource TextBrush}"
+                                                   FontSize="11"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </Border>
+                                <DataTemplate.Triggers>
+                                    <Trigger SourceName="EntryBorder" Property="IsMouseOver" Value="True">
+                                        <Setter TargetName="EntryBorder" Property="Background"
+                                                Value="{StaticResource SurfaceBrush}" />
+                                    </Trigger>
+                                </DataTemplate.Triggers>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </Border>
+            </Popup>
+        </Grid>
+    </Border>
+</Window>
