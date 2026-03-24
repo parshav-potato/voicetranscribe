@@ -1,3 +1,4 @@
+using System.IO;
 using NAudio.Wave;
 using VoiceTranscribe.Core;
 

@@ -1,53 +1,62 @@
 using System.CommandLine;
-using System.CommandLine.Invocation;
 using VoiceTranscribe.Cli;
 using VoiceTranscribe.Core;
 using VoiceTranscribe.Core.Models;
 
-var inputArg = new Argument<string>(
-    name: "input",
-    getDefaultValue: () => "-",
-    description: $"Audio file path, or '-' / omit for live microphone recording. " +
-                 $"Supported formats: {string.Join(", ", Constants.AudioExtensions.Order())}");
+var inputArg = new Argument<string>("input")
+{
+    Description = $"Audio file path, or '-' / omit for live microphone recording. " +
+                  $"Supported formats: {string.Join(", ", Constants.AudioExtensions.Order())}",
+    DefaultValueFactory = _ => "-",
+};
 
-var outputArg = new Argument<string>(
-    name: "output",
-    getDefaultValue: () => "-",
-    description: "Output file path, or '-' for stdout (default: stdout)");
+var outputArg = new Argument<string>("output")
+{
+    Description = "Output file path, or '-' for stdout (default: stdout)",
+    DefaultValueFactory = _ => "-",
+};
 
-var languageOption = new Option<string?>(
-    aliases: ["-l", "--language"],
-    description: "ISO-639-1 language code (e.g. en, de, fr, ja). Omit for auto-detection.");
+var languageOption = new Option<string?>("-l", "--language")
+{
+    Description = "ISO-639-1 language code (e.g. en, de, fr, ja). Omit for auto-detection.",
+};
 
-var promptOption = new Option<string?>(
-    aliases: ["-p", "--prompt"],
-    description: "Optional prompt to guide the model (e.g. spelling of names, technical terms, style).");
+var promptOption = new Option<string?>("-p", "--prompt")
+{
+    Description = "Optional prompt to guide the model (e.g. spelling of names, technical terms, style).",
+};
 
-var formatOption = new Option<ResponseFormat>(
-    aliases: ["-f", "--format"],
-    getDefaultValue: () => ResponseFormat.Json,
-    description: "Output format (default: Json). Use Srt or Vtt for subtitles, VerboseJson for timestamps.");
+var formatOption = new Option<ResponseFormat>("-f", "--format")
+{
+    Description = "Output format (default: Json). Use Srt or Vtt for subtitles, VerboseJson for timestamps.",
+    DefaultValueFactory = _ => ResponseFormat.Json,
+};
 
-var temperatureOption = new Option<float?>(
-    aliases: ["-t", "--temperature"],
-    description: "Sampling temperature 0-1. Lower = more deterministic.");
+var temperatureOption = new Option<float?>("-t", "--temperature")
+{
+    Description = "Sampling temperature 0-1. Lower = more deterministic.",
+};
 
-var translateOption = new Option<bool>(
-    name: "--translate",
-    description: "Translate audio to English instead of transcribing.");
+var translateOption = new Option<bool>("--translate")
+{
+    Description = "Translate audio to English instead of transcribing.",
+};
 
-var loopbackOption = new Option<bool>(
-    name: "--loopback",
-    description: "Record from system audio output (speakers) instead of microphone. Windows only (WASAPI).");
+var loopbackOption = new Option<bool>("--loopback")
+{
+    Description = "Record from system audio output (speakers) instead of microphone. Windows only (WASAPI).",
+};
 
-var deviceOption = new Option<int?>(
-    aliases: ["-d", "--device"],
-    description: "Audio device index to record from. Use --list-devices to see available devices. " +
-                 "Combine with --loopback to capture output from a specific device.");
+var deviceOption = new Option<int?>("-d", "--device")
+{
+    Description = "Audio device index to record from. Use --list-devices to see available devices. " +
+                  "Combine with --loopback to capture output from a specific device.",
+};
 
-var listDevicesOption = new Option<bool>(
-    name: "--list-devices",
-    description: "List all available audio devices and exit.");
+var listDevicesOption = new Option<bool>("--list-devices")
+{
+    Description = "List all available audio devices and exit.",
+};
 
 var rootCommand = new RootCommand(
     "Transcribe audio using Whisper via Siemens API.\n\n" +
@@ -66,26 +75,23 @@ var rootCommand = new RootCommand(
     listDevicesOption,
 };
 
-rootCommand.SetHandler(async (InvocationContext context) =>
+rootCommand.SetAction(async (parseResult, ct) =>
 {
-    var input = context.ParseResult.GetValueForArgument(inputArg);
-    var output = context.ParseResult.GetValueForArgument(outputArg);
-    var language = context.ParseResult.GetValueForOption(languageOption);
-    var prompt = context.ParseResult.GetValueForOption(promptOption);
-    var format = context.ParseResult.GetValueForOption(formatOption);
-    var temperature = context.ParseResult.GetValueForOption(temperatureOption);
-    var translate = context.ParseResult.GetValueForOption(translateOption);
-    var loopback = context.ParseResult.GetValueForOption(loopbackOption);
-    var device = context.ParseResult.GetValueForOption(deviceOption);
-    var listDevices = context.ParseResult.GetValueForOption(listDevicesOption);
-
-    var ct = context.GetCancellationToken();
+    var input = parseResult.GetValue(inputArg);
+    var output = parseResult.GetValue(outputArg);
+    var language = parseResult.GetValue(languageOption);
+    var prompt = parseResult.GetValue(promptOption);
+    var format = parseResult.GetValue(formatOption);
+    var temperature = parseResult.GetValue(temperatureOption);
+    var translate = parseResult.GetValue(translateOption);
+    var loopback = parseResult.GetValue(loopbackOption);
+    var device = parseResult.GetValue(deviceOption);
+    var listDevices = parseResult.GetValue(listDevicesOption);
 
     if (listDevices)
     {
         AudioRecorder.ListDevices(Console.Error);
-        context.ExitCode = 0;
-        return;
+        return 0;
     }
 
     var isLiveRecording = input == "-";
@@ -102,8 +108,8 @@ rootCommand.SetHandler(async (InvocationContext context) =>
 
             var timestamp = DateTime.Now.ToString("yyyy-MM-dd_HHmmss");
             Directory.CreateDirectory(Constants.SaveDirectory);
-            var savedAudioPath = System.IO.Path.Combine(Constants.SaveDirectory, $"{timestamp}.mp3");
-            savedTranscriptPath = System.IO.Path.Combine(Constants.SaveDirectory, $"{timestamp}.txt");
+            var savedAudioPath = Path.Combine(Constants.SaveDirectory, $"{timestamp}.mp3");
+            savedTranscriptPath = Path.Combine(Constants.SaveDirectory, $"{timestamp}.txt");
 
             File.Copy(audioPath, savedAudioPath, overwrite: true);
             await Console.Error.WriteLineAsync($"Audio saved to: {savedAudioPath}");
@@ -113,8 +119,7 @@ rootCommand.SetHandler(async (InvocationContext context) =>
             if (!File.Exists(input))
             {
                 await Console.Error.WriteLineAsync($"Error: Input file '{input}' not found");
-                context.ExitCode = 2;
-                return;
+                return 2;
             }
 
             AudioConverter.ValidateAudioFormat(input);
@@ -130,7 +135,7 @@ rootCommand.SetHandler(async (InvocationContext context) =>
             Translate = translate,
         };
 
-        using var orchestrator = new TranscriptionOrchestrator();
+        using var orchestrator = new TranscriptionOrchestrator(ApiKeyProvider.GetApiKey());
         var result = await orchestrator.TranscribeFileAsync(
             audioPath,
             options,
@@ -142,13 +147,12 @@ rootCommand.SetHandler(async (InvocationContext context) =>
             },
             ct: ct);
 
-        if (result.ChunksProcessed > 1)
+        if (result.ChunkCount > 1)
         {
             await Console.Error.WriteLineAsync();
-            await Console.Error.WriteLineAsync($"Done — transcribed {result.ChunksProcessed} chunks.");
+            await Console.Error.WriteLineAsync($"Done — transcribed {result.ChunkCount} chunks.");
         }
 
-        // Write result to output
         if (output == "-")
         {
             await Console.Out.WriteLineAsync(result.Text);
@@ -158,25 +162,24 @@ rootCommand.SetHandler(async (InvocationContext context) =>
             await File.WriteAllTextAsync(output, result.Text + Environment.NewLine, ct);
         }
 
-        // Save transcript for live recordings
         if (isLiveRecording && savedTranscriptPath is not null)
         {
             await File.WriteAllTextAsync(savedTranscriptPath, result.Text + Environment.NewLine, ct);
             await Console.Error.WriteLineAsync($"Transcript saved to: {savedTranscriptPath}");
         }
 
-        context.ExitCode = 0;
+        return 0;
     }
     catch (OperationCanceledException)
     {
         await Console.Error.WriteLineAsync("Operation cancelled.");
-        context.ExitCode = 130;
+        return 130;
     }
     catch (Exception ex)
     {
         await Console.Error.WriteLineAsync($"Error: {ex.Message}");
-        context.ExitCode = 1;
+        return 1;
     }
 });
 
-return await rootCommand.InvokeAsync(args);
+return await rootCommand.Parse(args).InvokeAsync();

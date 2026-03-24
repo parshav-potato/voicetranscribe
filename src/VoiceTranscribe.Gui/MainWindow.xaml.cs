@@ -5,6 +5,8 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Threading;
 using VoiceTranscribe.Core;
+using VoiceTranscribe.Gui.Models;
+using VoiceTranscribe.Gui.Services;
 using VoiceTranscribe.Gui.ViewModels;
 
 namespace VoiceTranscribe.Gui;
@@ -216,10 +218,11 @@ public partial class MainWindow : Window
     {
         try
         {
-            var settings = SettingsProvider.Load();
-            settings.WindowX = (int)Left;
-            settings.WindowY = (int)Top;
-            SettingsProvider.Save(settings);
+            var svc = new SettingsService();
+            svc.Load();
+            svc.Settings.WindowX = Left;
+            svc.Settings.WindowY = Top;
+            svc.Save();
         }
         catch
         {
@@ -230,8 +233,9 @@ public partial class MainWindow : Window
     {
         try
         {
-            var settings = SettingsProvider.Load();
-            if (settings.WindowX is { } x && settings.WindowY is { } y)
+            var svc = new SettingsService();
+            svc.Load();
+            if (svc.Settings.WindowX is { } x && svc.Settings.WindowY is { } y)
             {
                 double screenW = SystemParameters.PrimaryScreenWidth;
                 double screenH = SystemParameters.PrimaryScreenHeight;
@@ -280,8 +284,8 @@ public partial class MainWindow : Window
                 Style = (Style)FindResource("DarkMenuItemStyle"),
             };
 
-            string? capturedCode = code;
-            item.Click += (_, _) => ViewModel?.SetLanguageCommand.Execute(capturedCode);
+            var langTuple = (code, name);
+            item.Click += (_, _) => ViewModel?.SetLanguageCommand.Execute(langTuple);
 
             LanguageMenu.Items.Add(item);
         }
