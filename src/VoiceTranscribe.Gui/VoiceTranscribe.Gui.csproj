@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ApplicationIcon>Resources\microphone_icon.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\VoiceTranscribe.Core\VoiceTranscribe.Core.csproj" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.*" />
+    <PackageReference Include="NAudio" Version="2.*" />
+    <PackageReference Include="H.NotifyIcon.Wpf" Version="2.*" />
+    <PackageReference Include="NHotkey.Wpf" Version="3.*" />
+  </ItemGroup>
+  <ItemGroup>
+    <Resource Include="Resources\microphone_icon.ico" />
+  </ItemGroup>
+</Project>
